@@ -36,7 +36,8 @@ __gshared string libraryPath;
 __gshared string provisioningPath;
 
 enum brandingCode = format!"anisette-v3-server v%s"(provisionVersion);
-enum clientInfo = "<Pixel 11 Pro> <Android;17;CD1A.261005.003> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+// enum clientInfo = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+enum clientInfo = "<Galaxy S26 Ultra> <Android;17;CD1A.261005.003> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 enum dsId = -2;
 
 __gshared ADI v1Adi;
@@ -141,7 +142,8 @@ int main(string[] args) {
 		import std.random;
 		import std.range;
 		v1Device.serverFriendlyDescription = clientInfo;
-		v1Device.uniqueDeviceIdentifier = "7B9E256F-8D10-4A59-B6E4-91D0E4A12B89";
+		// v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
+		v1Device.uniqueDeviceIdentifier = "5F3E2B1A-8C7D-4E9A-B0F1-A2B3C4D5E6F7";
 		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
 		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
 
