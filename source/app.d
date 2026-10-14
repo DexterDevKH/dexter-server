@@ -142,8 +142,7 @@ int main(string[] args) {
 		import std.random;
 		import std.range;
 		v1Device.serverFriendlyDescription = clientInfo;
-		// v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
-		v1Device.uniqueDeviceIdentifier = "5F3E2B1A-8C7D-4E9A-B0F1-A2B3C4D5E6F7";
+		v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
 		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
 		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
 
