@@ -144,9 +144,12 @@ int main(string[] args) {
 		v1Device.serverFriendlyDescription = clientInfo;
 		v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
 		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
-		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
+		v1Device.localUserUUID = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
 
 		log.info("Machine creation done!");
+	} else {
+		v1Device.serverFriendlyDescription = clientInfo;
+		v1Device.localUserUUID = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
 	}
 
 	v1Adi.identifier = v1Device.adiIdentifier;
@@ -212,11 +215,11 @@ class AnisetteService {
 			"X-Apple-I-Client-Time": time.toISOExtString.split('.')[0] ~ "Z",
 			"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 			"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
-			"X-Apple-I-MD-RINFO": to!string(17106176),
-			"X-Apple-I-MD-LU": v1Device.localUserUUID,
+			"X-Apple-I-MD-RINFO": "33883392",
+			"X-Apple-I-MD-LU": Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier),
 			"X-Apple-I-SRL-NO": "0",
-			"X-MMe-Client-Info": v1Device.serverFriendlyDescription,
-			"X-Apple-I-TimeZone": time.timezone.dstName,
+			"X-MMe-Client-Info": clientInfo,
+			"X-Apple-I-TimeZone": "GMT",
 			"X-Apple-Locale": "en_US",
 			"X-Mme-Device-Id": v1Device.uniqueDeviceIdentifier,
 		];
@@ -279,7 +282,7 @@ class AnisetteService {
 				"result": "Headers",
 				"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 				"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
-				"X-Apple-I-MD-RINFO": "17106176",
+				"X-Apple-I-MD-RINFO": "33883392",
 			];
 			res.headers["Implementation-Version"] = brandingCode;
 			res.writeBody(response.toString(JSONOptions.doNotEscapeSlashes), "application/json");
