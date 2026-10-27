@@ -198,7 +198,7 @@ class AnisetteService {
 		import core.time;
 		auto log = getLogger();
 		log.info("[<<] anisette-v1 request");
-		auto time = Clock.currTime();
+		auto time = Clock.currTime(UTC());
 
 		if (!v1Adi.isMachineProvisioned(dsId)) {
 			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);

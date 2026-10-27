@@ -7,8 +7,17 @@ anisette-v3) but it can also be used with AltServer-Linux.
 
 ## Run using Docker
 
+### Option A: Build and run locally on your server (Recommended)
 ```bash
-docker run -d --restart always --name anisette-v3 -p 6969:6969 --volume anisette-v3_data:/home/Alcoholic/.config/anisette-v3/lib/ dadoum/anisette-v3-server
+git clone https://github.com/DexterDevKH/dexter-server.git
+cd dexter-server
+docker build -t dexter-anisette .
+docker run -d --restart always --name anisette-v3 -p 6969:6969 --volume anisette-v3_data:/home/Alcoholic/.config/anisette-v3/lib/ dexter-anisette
+```
+
+### Option B: Run via GitHub Container Registry
+```bash
+docker run -d --restart always --name anisette-v3 -p 6969:6969 --volume anisette-v3_data:/home/Alcoholic/.config/anisette-v3/lib/ ghcr.io/dexterdevkh/dexter-server:latest
 ```
 
 ## Compile using dub
