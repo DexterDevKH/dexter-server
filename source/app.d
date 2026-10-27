@@ -37,7 +37,7 @@ __gshared string provisioningPath;
 
 enum brandingCode = format!"anisette-v3-server v%s"(provisionVersion);
 // enum clientInfo = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
-enum clientInfo = "<PC> <Windows;10.0(0,0);26300.9711> <com.apple.AuthKit/1 (com.apple.iTunes/12.13.4.4)>";
+enum clientInfo = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 enum dsId = -2;
 
 __gshared ADI v1Adi;
