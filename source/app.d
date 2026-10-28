@@ -15,6 +15,7 @@ import vibe.http.router;
 import vibe.http.server;
 import vibe.http.websockets;
 import vibe.inet.url;
+import vibe.stream.operations : readAllUTF8;
 import vibe.stream.tls;
 import vibe.web.web;
 
@@ -42,9 +43,6 @@ UpstreamResponse forwardGET(string path) {
 	auto settings = new HTTPClientSettings;
 	settings.connectTimeout = 5.seconds;
 	settings.readTimeout = timeout;
-	auto tlsCtx = createTLSContext(TLSContextKind.client);
-	tlsCtx.peerValidationMode = TLSPeerValidationMode.none;
-	settings.tlsContext = tlsCtx;
 
 	foreach (upstream; upstreamServers) {
 		try {
@@ -86,9 +84,6 @@ UpstreamResponse forwardPOST(string path, string jsonPayload) {
 	auto settings = new HTTPClientSettings;
 	settings.connectTimeout = 5.seconds;
 	settings.readTimeout = timeout;
-	auto tlsCtx = createTLSContext(TLSContextKind.client);
-	tlsCtx.peerValidationMode = TLSPeerValidationMode.none;
-	settings.tlsContext = tlsCtx;
 
 	foreach (upstream; upstreamServers) {
 		try {
@@ -353,9 +348,6 @@ class AnisetteService {
 				auto settings = new HTTPClientSettings;
 				settings.connectTimeout = 5.seconds;
 				settings.readTimeout = timeout;
-				auto tlsCtx = createTLSContext(TLSContextKind.client);
-				tlsCtx.peerValidationMode = TLSPeerValidationMode.none;
-				settings.tlsContext = tlsCtx;
 
 				WebSocket upstreamWs = connectWebSocket(wsUrl, settings);
 				scope(exit) {
