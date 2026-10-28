@@ -233,7 +233,7 @@ class AnisetteService {
 		log.info("[<<] anisette-v3 /v3/client_info");
 		JSONValue responseJson = [
 			"client_info": clientInfo,
-			"user_agent": "akd/1.0 CFNetwork/808.1.4"
+			"user_agent": "akd/1.0 CFNetwork/1408.0.4 Darwin/22.5.0"
 		];
 
 		res.headers["Implementation-Version"] = brandingCode;
