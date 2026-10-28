@@ -37,7 +37,7 @@ __gshared string provisioningPath;
 
 enum brandingCode = format!"anisette-v3-server v%s"(provisionVersion);
 // enum clientInfo = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
-enum clientInfo = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+enum clientInfo = "<PC> <Windows;10.0(0,0);26300.9711> <com.apple.AuthKit/1 (com.apple.iTunes/12.13.4.4)>";
 enum dsId = -2;
 
 __gshared ADI v1Adi;
@@ -144,12 +144,9 @@ int main(string[] args) {
 		v1Device.serverFriendlyDescription = clientInfo;
 		v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
 		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
-		v1Device.localUserUUID = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
+		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
 
 		log.info("Machine creation done!");
-	} else {
-		v1Device.serverFriendlyDescription = clientInfo;
-		v1Device.localUserUUID = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
 	}
 
 	v1Adi.identifier = v1Device.adiIdentifier;
@@ -198,7 +195,7 @@ class AnisetteService {
 		import core.time;
 		auto log = getLogger();
 		log.info("[<<] anisette-v1 request");
-		auto time = Clock.currTime(UTC());
+		auto time = Clock.currTime();
 
 		if (!v1Adi.isMachineProvisioned(dsId)) {
 			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);
@@ -215,11 +212,11 @@ class AnisetteService {
 			"X-Apple-I-Client-Time": time.toISOExtString.split('.')[0] ~ "Z",
 			"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 			"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
-			"X-Apple-I-MD-RINFO": "33883392",
-			"X-Apple-I-MD-LU": Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier),
+			"X-Apple-I-MD-RINFO": to!string(17106176),
+			"X-Apple-I-MD-LU": v1Device.localUserUUID,
 			"X-Apple-I-SRL-NO": "0",
-			"X-MMe-Client-Info": clientInfo,
-			"X-Apple-I-TimeZone": "GMT",
+			"X-MMe-Client-Info": v1Device.serverFriendlyDescription,
+			"X-Apple-I-TimeZone": time.timezone.dstName,
 			"X-Apple-Locale": "en_US",
 			"X-Mme-Device-Id": v1Device.uniqueDeviceIdentifier,
 		];
@@ -236,7 +233,7 @@ class AnisetteService {
 		log.info("[<<] anisette-v3 /v3/client_info");
 		JSONValue responseJson = [
 			"client_info": clientInfo,
-			"user_agent": "akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0"
+			"user_agent": "akd/1.0 CFNetwork/808.1.4"
 		];
 
 		res.headers["Implementation-Version"] = brandingCode;
@@ -282,7 +279,7 @@ class AnisetteService {
 				"result": "Headers",
 				"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 				"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
-				"X-Apple-I-MD-RINFO": "33883392",
+				"X-Apple-I-MD-RINFO": "17106176",
 			];
 			res.headers["Implementation-Version"] = brandingCode;
 			res.writeBody(response.toString(JSONOptions.doNotEscapeSlashes), "application/json");
