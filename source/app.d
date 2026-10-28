@@ -141,7 +141,7 @@ int main(string[] args) {
 	string certificateChainPath = null;
 	string privateKeyPath = null;
 
-	long timeoutMsecs = 10000;
+	long timeoutMsecs = 15000;
 	bool skipServerStartup = false;
 	string customUpstream = null;
 
@@ -339,10 +339,10 @@ class AnisetteService {
 			try {
 				log.infoF!"[.. %s] Connecting to upstream WebSocket: %s"(requestUUID, upstream);
 				auto wsUrl = URL(upstream ~ "/v3/provisioning_session");
-				if (wsUrl.schema == "wss") {
-					wsUrl.schema = "https";
-				} else if (wsUrl.schema == "ws") {
-					wsUrl.schema = "http";
+				if (wsUrl.schema == "https" || wsUrl.schema == "wss") {
+					wsUrl.schema = "wss";
+				} else {
+					wsUrl.schema = "ws";
 				}
 
 				auto settings = new HTTPClientSettings;
@@ -375,6 +375,9 @@ class AnisetteService {
 								requestUUID,
 								msg.canFind("ProvisioningSuccess") ? "SUCCESS" : "TERMINATION"
 							);
+							if (msg.canFind("ProvisioningSuccess")) {
+								sleep(500.msecs);
+							}
 							break;
 						}
 						upstreamTurn = false;
