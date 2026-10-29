@@ -1,13 +1,12 @@
 ---
-- name: Setup anisette-v3 (dexter-server macOS ADI Relay)
+- name: Setup anisette-v3 (dexter-server Standalone macOS ADI Server)
   hosts: ur.host.ip.addr
   gather_facts: false
   become: True
   vars:
-    # Use dexter-server macOS ADI proxy image to permanently bypass -80045 and -80046
+    # Standalone container image with authentic Mac profile to permanently fix -80045 and -80046
     anisette_image: "ghcr.io/chandara/dexter-server:latest"
-    # Primary verified upstream macOS ADI server (default: new.ani.sidestore.io)
-    upstream_anisette_url: "https://new.ani.sidestore.io"
+    anisette_profile: "mac"
 
   tasks:
     - name: Setup podman deps
@@ -57,7 +56,9 @@
         rm: true
         publish: 6969:6969
         env:
-          UPSTREAM_ANISETTE_URL: "{{ upstream_anisette_url }}"
+          ANISETTE_PROFILE: "{{ anisette_profile }}"
+        volumes:
+          - "/home/rootless/anisette-data:/home/Alcoholic/.config/anisette-v3:Z"
       become_user: rootless
 
     - name: Generate systemd unit file for anisette-v3 container

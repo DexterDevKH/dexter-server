@@ -1,21 +1,28 @@
 import core.time;
+import core.memory;
+
 import std.algorithm.searching;
 import std.array;
+import std.base64;
 import std.conv;
+import std.digest;
+import file = std.file;
 import std.format;
 import std.getopt;
 import std.json;
+import std.math;
+import std.net.curl;
+import std.parallelism;
 import process = std.process;
-import std.string;
+import std.path;
+import std.uni;
 import std.uuid;
+import std.zip;
 
 import vibe.core.core;
-import vibe.http.client;
-import vibe.http.router;
-import vibe.http.server;
 import vibe.http.websockets;
-import vibe.inet.url;
-import vibe.stream.operations : readAllUTF8;
+import vibe.http.server;
+import vibe.http.router;
 import vibe.stream.tls;
 import vibe.web.web;
 
@@ -23,123 +30,60 @@ import slf4d;
 import slf4d: Logger;
 import slf4d.default_provider;
 
-enum brandingCode = "anisette-v3-server (dexter macOS proxy v1.3.3)";
+import provision;
+import provision.androidlibrary;
 
-// Genuine macOS AuthKit descriptor & User-Agent verified in macOS 27 fix v1.3.3
-enum fallbackClientInfo = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
-enum fallbackUserAgent = "akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0";
+__gshared string libraryPath;
+__gshared string provisioningPath;
 
-__gshared string[] upstreamServers;
-__gshared size_t activeUpstreamIndex = 0;
+enum brandingCode = format!"anisette-v3-server v%s"(provisionVersion);
+enum dsId = -2;
+
+struct AnisetteProfile {
+	string clientInfo;
+	string userAgent;
+	string routingInfo;
+}
+
+// Profile presets learned from altserver-macos27-anisette-fix and AltStore PR #1834:
+// 1. "mac" (default): Authentic Mac AuthKit profile from altserver-macos27-anisette-fix v1.3.3.
+//    Fixes Apple GrandSlam -80045, -80046, and invalid anisette responses.
+enum macProfile = AnisetteProfile(
+	"<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+	"akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0",
+	"16777216" // 0x01000000 (Mac ADI routing info)
+);
+
+// 2. "mac-xcode": Modern macOS AuthKit + Xcode profile from altserver-macos27-anisette-fix v3.8 helper
+enum macXcodeProfile = AnisetteProfile(
+	"<MacBookPro13,3> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/25183.54.10)>",
+	"akd/1.0 CFNetwork/808.1.4",
+	"16777216"
+);
+
+// 3. "windows": Authentic Windows 10 x64 iTunes profile from AltStore PR #1834
+enum windowsProfile = AnisetteProfile(
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>",
+	"iTunes/12.12.4 (Windows; Microsoft Windows 10 x64)",
+	"16777216"
+);
+
+// 4. "windows-akd": Windows AuthKit profile
+enum windowsAkdProfile = AnisetteProfile(
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+	"akd/1.0 CFNetwork/808.1.4",
+	"16777216"
+);
+
+__gshared string activeProfileName = "mac";
+__gshared string activeClientInfo;
+__gshared string activeUserAgent;
+__gshared string activeRoutingInfo;
+
+__gshared ADI v1Adi;
+__gshared Device v1Device;
+
 __gshared Duration timeout;
-
-HTTPClientSettings createProxyClientSettings() {
-	auto settings = new HTTPClientSettings;
-	settings.connectTimeout = 5.seconds;
-	settings.readTimeout = timeout;
-	settings.tlsContextSetup = (TLSContext ctx) @safe nothrow {
-		try {
-			ctx.peerValidationMode = TLSPeerValidationMode.none;
-		} catch (Exception) {
-		}
-	};
-	return settings;
-}
-
-struct UpstreamResponse {
-	int statusCode;
-	string contentType;
-	string responseBody;
-}
-
-UpstreamResponse forwardGET(string path) {
-	auto log = getLogger();
-	auto settings = createProxyClientSettings();
-
-	size_t count = upstreamServers.length;
-	for (size_t i = 0; i < count; i++) {
-		size_t targetIdx = (activeUpstreamIndex + i) % count;
-		string upstream = upstreamServers[targetIdx];
-		try {
-			UpstreamResponse res;
-			auto targetUrl = URL(upstream ~ path);
-			log.infoF!"[->] Forwarding GET %s to %s"(path, targetUrl.toString());
-
-			requestHTTP(targetUrl,
-				(scope req) {
-					req.method = HTTPMethod.GET;
-					req.headers["User-Agent"] = "dexter-server-proxy";
-					req.headers["Accept"] = "application/json";
-				},
-				(scope upstreamRes) {
-					res.statusCode = upstreamRes.statusCode;
-					if ("Content-Type" in upstreamRes.headers) {
-						res.contentType = upstreamRes.headers["Content-Type"];
-					}
-					res.responseBody = upstreamRes.bodyReader.readAllUTF8();
-				},
-				settings
-			);
-
-			if (res.statusCode == 200) {
-				log.infoF!"[<-] Upstream [%s] responded with 200 OK for GET %s"(upstream, path);
-				activeUpstreamIndex = targetIdx;
-				return res;
-			} else {
-				log.warnF!"[!] Upstream [%s] returned HTTP %d for GET %s"(upstream, res.statusCode, path);
-			}
-		} catch (Exception ex) {
-			log.warnF!"[!] Failed GET %s on upstream [%s]: %s"(path, upstream, ex.msg);
-		}
-	}
-	throw new Exception("All upstream macOS ADI servers failed for GET " ~ path);
-}
-
-UpstreamResponse forwardPOST(string path, string jsonPayload) {
-	auto log = getLogger();
-	auto settings = createProxyClientSettings();
-
-	size_t count = upstreamServers.length;
-	for (size_t i = 0; i < count; i++) {
-		size_t targetIdx = (activeUpstreamIndex + i) % count;
-		string upstream = upstreamServers[targetIdx];
-		try {
-			UpstreamResponse res;
-			auto targetUrl = URL(upstream ~ path);
-			log.infoF!"[->] Forwarding POST %s to %s"(path, targetUrl.toString());
-
-			requestHTTP(targetUrl,
-				(scope req) {
-					req.method = HTTPMethod.POST;
-					req.headers["User-Agent"] = "dexter-server-proxy";
-					req.headers["Content-Type"] = "application/json";
-					req.headers["Accept"] = "application/json";
-					req.headers["Content-Length"] = to!string(jsonPayload.length);
-					req.bodyWriter.write(cast(const(ubyte)[]) jsonPayload);
-				},
-				(scope upstreamRes) {
-					res.statusCode = upstreamRes.statusCode;
-					if ("Content-Type" in upstreamRes.headers) {
-						res.contentType = upstreamRes.headers["Content-Type"];
-					}
-					res.responseBody = upstreamRes.bodyReader.readAllUTF8();
-				},
-				settings
-			);
-
-			if (res.statusCode == 200) {
-				log.infoF!"[<-] Upstream [%s] responded with 200 OK for POST %s"(upstream, path);
-				activeUpstreamIndex = targetIdx;
-				return res;
-			} else {
-				log.warnF!"[!] Upstream [%s] returned HTTP %d for POST %s: %s"(upstream, res.statusCode, path, res.responseBody);
-			}
-		} catch (Exception ex) {
-			log.warnF!"[!] Failed POST %s on upstream [%s]: %s"(path, upstream, ex.msg);
-		}
-	}
-	throw new Exception("All upstream macOS ADI servers failed for POST " ~ path);
-}
 
 int main(string[] args) {
 	debug {
@@ -150,95 +94,185 @@ int main(string[] args) {
 
 	Logger log = getLogger();
 	log.info(brandingCode);
-	log.info("Starting dexter-server as macOS ADI Reverse Proxy (Bypassing -80045 / -80046)...");
-
 	string hostname = "0.0.0.0";
 	ushort port = 6969;
 
-	string configurationPath = null;
+	// Respect PORT environment variable (standard on Render, Railway, Fly.io, etc.)
+	if (auto envPort = process.environment.get("PORT")) {
+		try {
+			port = envPort.to!ushort;
+		} catch (Exception) {
+			log.warnF!"Invalid PORT environment variable '%s', defaulting to %s"(envPort, port);
+		}
+	}
+
+	// Determine active profile preset from environment or default to "mac"
+	activeProfileName = process.environment.get("ANISETTE_PROFILE", "mac");
+
+	AnisetteProfile selectedProfile;
+	switch (activeProfileName.toLower()) {
+		case "windows":
+		case "pc":
+			activeProfileName = "windows";
+			selectedProfile = windowsProfile;
+			break;
+		case "windows-akd":
+			activeProfileName = "windows-akd";
+			selectedProfile = windowsAkdProfile;
+			break;
+		case "mac-xcode":
+		case "xcode":
+			activeProfileName = "mac-xcode";
+			selectedProfile = macXcodeProfile;
+			break;
+		case "mac":
+		case "macos":
+		default:
+			activeProfileName = "mac";
+			selectedProfile = macProfile;
+			break;
+	}
+
+	// Allow granular overrides via environment variables
+	activeClientInfo = process.environment.get("ANISETTE_CLIENT_INFO",
+		process.environment.get("CLIENT_INFO", selectedProfile.clientInfo));
+
+	activeUserAgent = process.environment.get("ANISETTE_USER_AGENT",
+		process.environment.get("USER_AGENT", selectedProfile.userAgent));
+
+	activeRoutingInfo = process.environment.get("ANISETTE_ROUTING_INFO",
+		process.environment.get("ROUTING_INFO", selectedProfile.routingInfo));
+
+	string configurationPath = process.environment.get("ANISETTE_CONFIG_DIR",
+		process.environment.get("CONFIG_DIR", expandTilde("~/.config/anisette-v3")));
+
 	string certificateChainPath = null;
 	string privateKeyPath = null;
 
-	long timeoutMsecs = 15000;
+	long timeoutMsecs = 3000;
+
 	bool skipServerStartup = false;
-	string customUpstream = null;
 
 	auto helpInformation = getopt(
 		args,
 		"n|host", format!"The hostname to bind to (default: %s)"(hostname), &hostname,
 		"p|port", format!"The port to bind to (default: %s)"(port), &port,
-		"u|upstream", "Comma-separated list of upstream macOS ADI server URLs (e.g. https://new.ani.sidestore.io)", &customUpstream,
-		"a|adi-path", "Legacy argument (unused in reverse proxy mode)", &configurationPath,
-		"timeout", format!"Timeout duration in milliseconds (default: %d)"(timeoutMsecs), &timeoutMsecs,
+		"a|adi-path", format!"Where the provisioning information should be stored on the computer for anisette-v1 backwards compat (default: %s)"(configurationPath), &configurationPath,
+		"timeout", format!"Timeout duration for Anisette V3 in milliseconds (default: %d)"(timeoutMsecs), &timeoutMsecs,
+		"profile", format!"Profile preset (mac, mac-xcode, windows, windows-akd) (default: %s)"(activeProfileName), &activeProfileName,
+		"client-info", format!"Apple AuthKit client info string (default: %s)"(activeClientInfo), &activeClientInfo,
+		"user-agent", format!"User-Agent string for Apple requests (default: %s)"(activeUserAgent), &activeUserAgent,
+		"routing-info", format!"Routing info string (default: %s)"(activeRoutingInfo), &activeRoutingInfo,
 		"private-key", "Path to the PEM-formatted private key file for HTTPS support (requires --cert-chain)", &certificateChainPath,
 		"cert-chain", "Path to the PEM-formatted certificate chain file for HTTPS support (requires --private-key)", &privateKeyPath,
-		"skip-server-startup", "If provided the server will skip HTTP binding and exit immediately.", &skipServerStartup,
+		"skip-server-startup", "If provided the server will skip HTTP binding and instead execute only initial configuration (if needed).", &skipServerStartup,
 	);
 
 	timeout = dur!"msecs"(timeoutMsecs);
 
+	log.infoF!"[Active Profile: %s]"(activeProfileName);
+	log.infoF!"  Client-Info:  %s"(activeClientInfo);
+	log.infoF!"  User-Agent:   %s"(activeUserAgent);
+	log.infoF!"  Routing-Info: %s"(activeRoutingInfo);
+
 	if ((certificateChainPath && !privateKeyPath) || (!certificateChainPath && privateKeyPath)) {
-		log.error("--certificate-chain and --private-key must both be specified for HTTPS support (they can both be in the same file though).");
+		log.error("--certificate-chain and --private-key must both be specified for HTTPS support (they can be both be in the same file though).");
 		return 1;
 	}
 
 	if (helpInformation.helpWanted) {
-		defaultGetoptPrinter("anisette-server with v3 reverse-proxy support", helpInformation.options);
+		defaultGetoptPrinter("anisette-server with v3 support", helpInformation.options);
 		return 0;
+	}
+
+	if (!file.exists(configurationPath)) {
+		file.mkdirRecurse(configurationPath);
+	}
+
+	libraryPath = configurationPath.buildPath("lib");
+
+	string runtimePath = process.environment.get("RUNTIME_DIRECTORY", process.environment.get("XDG_RUNTIME_DIR", file.getcwd()))
+		.buildPath("anisette-v3");
+	provisioningPath = runtimePath.buildPath("provisioning");
+
+	auto coreADIPath = libraryPath.buildPath("libCoreADI.so");
+	auto SSCPath = libraryPath.buildPath("libstoreservicescore.so");
+
+	if (!(file.exists(coreADIPath) && file.exists(SSCPath))) {
+		auto http = HTTP();
+		log.info("Downloading libraries from Apple servers...");
+		auto apkData = get!(HTTP, ubyte)("https://apps.mzstatic.com/content/android-apple-music-apk/applemusic.apk", http);
+		log.info("Done !");
+		auto apk = new ZipArchive(apkData);
+		auto dir = apk.directory();
+
+		if (!file.exists(libraryPath)) {
+			file.mkdirRecurse(libraryPath);
+		}
+
+		version (X86_64) {
+			enum string architectureIdentifier = "x86_64";
+		} else version (X86) {
+			enum string architectureIdentifier = "x86";
+		} else version (AArch64) {
+			enum string architectureIdentifier = "arm64-v8a";
+		} else version (ARM) {
+			enum string architectureIdentifier = "armeabi-v7a";
+		} else {
+			static assert(false, "Architecture not supported :(");
+		}
+
+		file.write(coreADIPath, apk.expand(dir["lib/" ~ architectureIdentifier ~ "/libCoreADI.so"]));
+		file.write(SSCPath, apk.expand(dir["lib/" ~ architectureIdentifier ~ "/libstoreservicescore.so"]));
+	}
+
+	// Initializing ADI and machine if it has not already been made.
+	v1Device = new Device(configurationPath.buildPath("device.json"));
+	v1Adi = new ADI(libraryPath);
+	v1Adi.provisioningPath = configurationPath;
+
+	if (!v1Device.initialized) {
+		log.info("Creating machine... ");
+
+		import std.random;
+		import std.range;
+		v1Device.serverFriendlyDescription = activeClientInfo;
+		v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
+		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
+		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
+
+		log.info("Machine creation done!");
+	} else {
+		if (v1Device.serverFriendlyDescription != activeClientInfo) {
+			log.infoF!"Updating device description to active clientInfo: %s"(activeClientInfo);
+			v1Device.serverFriendlyDescription = activeClientInfo;
+		}
+	}
+
+	v1Adi.identifier = v1Device.adiIdentifier;
+	if (!v1Adi.isMachineProvisioned(dsId)) {
+		log.info("Machine requires provisioning... ");
+
+		try {
+			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);
+			provisioningSession.provision(dsId);
+			log.info("Provisioning done!");
+		} catch (Exception ex) {
+			log.warnF!"Provisioning session failed: %s"(ex.msg);
+		}
 	}
 
 	if (skipServerStartup) {
-		log.info("skipServerStartup flag provided, exiting.");
+		log.info("Configuration complete, shutting down.");
 		return 0;
 	}
 
-	// Build upstream servers list
-	string envUpstream = process.environment.get("UPSTREAM_ANISETTE_URL", process.environment.get("UPSTREAM_SERVERS", null));
-	if (customUpstream.length == 0 && envUpstream.length > 0) {
-		customUpstream = envUpstream;
-	}
-
-	if (customUpstream.length > 0) {
-		foreach (entry; customUpstream.split(",")) {
-			auto trimmed = entry.strip();
-			if (trimmed.length > 0) {
-				if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-					trimmed = "https://" ~ trimmed;
-				}
-				if (trimmed.endsWith("/")) {
-					trimmed = trimmed[0 .. $ - 1];
-				}
-				upstreamServers ~= trimmed;
-			}
-		}
-	}
-
-	// Default verified genuine macOS ADI upstreams
-	string[] defaultUpstreams = [
-		"https://new.ani.sidestore.io",
-		"https://mac-ani.jkcoxson.com",
-		"https://ani.jkcoxson.com",
-		"https://ani.iloader.app",
-		"https://ani3.stikstore.app",
-		"https://ani2.stikstore.app"
-	];
-
-	foreach (def; defaultUpstreams) {
-		if (!upstreamServers.canFind(def)) {
-			upstreamServers ~= def;
-		}
-	}
-
-	log.info("Configured Upstream macOS ADI Servers (in priority order):");
-	foreach (idx, s; upstreamServers) {
-		log.infoF!"  [%d] %s"(idx + 1, s);
-	}
-
-	// Create router and register web interface
+	// Create the router that will map the incoming requests to request handlers
 	auto router = new URLRouter();
+	// Register AnisetteService as a web service
 	router.registerWebInterface(new AnisetteService());
 
-	// Start up the HTTP server
+	// Start up the HTTP server.
 	auto settings = new HTTPServerSettings;
 	settings.port = port;
 	settings.bindAddresses = [hostname];
@@ -249,191 +283,289 @@ int main(string[] args) {
 		settings.tlsContext.usePrivateKeyFile(privateKeyPath);
 	}
 
+	log.infoF!"Listening on %s:%d"(hostname, port);
 	auto listener = listenHTTP(settings, router);
-	log.infoF!"Server listening on %s:%d"(hostname, port);
 
 	return runApplication(&args);
 }
 
 class AnisetteService {
 	@method(HTTPMethod.GET)
+	@path("/health")
+	void healthCheck(HTTPServerRequest req, HTTPServerResponse res) {
+		JSONValue health = [
+			"status": "ok",
+			"service": brandingCode,
+			"profile": activeProfileName
+		];
+		res.headers["Implementation-Version"] = brandingCode;
+		res.writeBody(health.toString(JSONOptions.doNotEscapeSlashes), "application/json");
+	}
+
+	@method(HTTPMethod.GET)
 	@path("/")
 	void handleV1Request(HTTPServerRequest req, HTTPServerResponse res) {
+		import std.datetime.systime;
+		import std.datetime.timezone;
+		import core.time;
 		auto log = getLogger();
-		log.info("[<<] anisette-v1 request (proxying to upstream)");
+		log.info("[<<] anisette-v1 request");
+		auto time = Clock.currTime();
 
-		try {
-			auto upstreamRes = forwardGET("/");
-			res.headers["Implementation-Version"] = brandingCode;
-			res.writeBody(upstreamRes.responseBody, upstreamRes.contentType.length ? upstreamRes.contentType : "application/json");
-			log.info("[>>] 200 OK (v1 relayed from upstream)");
-		} catch (Exception ex) {
-			log.errorF!"[!!] Failed to relay v1 request: %s"(ex.msg);
-			res.statusCode = 502;
-			res.writeBody(format!`{"error": "Upstream error: %s"}`(ex.msg), "application/json");
+		if (!v1Adi.isMachineProvisioned(dsId)) {
+			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);
+			provisioningSession.provision(dsId);
+			log.info("Provisioning done!");
 		}
+		
+		auto otp = v1Adi.requestOTP(dsId);
+
+		JSONValue responseJson = [
+			"X-Apple-I-Client-Time": time.toISOExtString.split('.')[0] ~ "Z",
+			"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
+			"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
+			"X-Apple-I-MD-RINFO": activeRoutingInfo,
+			"X-Apple-I-MD-LU": v1Device.localUserUUID,
+			"X-Apple-I-SRL-NO": "0",
+			"X-MMe-Client-Info": activeClientInfo,
+			"X-Apple-I-TimeZone": time.timezone.dstName,
+			"X-Apple-Locale": "en_US",
+			"X-Mme-Device-Id": v1Device.uniqueDeviceIdentifier,
+		];
+
+		res.headers["Implementation-Version"] = brandingCode;
+		res.writeBody(responseJson.toString(JSONOptions.doNotEscapeSlashes), "application/json");
+		log.infoF!"[>>] 200 OK %s"(responseJson);
 	}
 
 	@method(HTTPMethod.GET)
 	@path("/v3/client_info")
 	void getClientInfo(HTTPServerRequest req, HTTPServerResponse res) {
 		auto log = getLogger();
-		log.info("[<<] anisette-v3 /v3/client_info (proxying to upstream)");
+		log.info("[<<] anisette-v3 /v3/client_info");
+		JSONValue responseJson = [
+			"client_info": activeClientInfo,
+			"user_agent": activeUserAgent
+		];
 
-		try {
-			auto upstreamRes = forwardGET("/v3/client_info");
-			res.headers["Implementation-Version"] = brandingCode;
-			res.writeBody(upstreamRes.responseBody, upstreamRes.contentType.length ? upstreamRes.contentType : "application/json");
-			log.info("[>>] 200 OK (client_info relayed)");
-		} catch (Exception ex) {
-			log.warnF!"[!] Upstream client_info failed: %s, returning verified macOS client info fallback"(ex.msg);
-			JSONValue fallbackJson = [
-				"client_info": fallbackClientInfo,
-				"user_agent": fallbackUserAgent
-			];
-			res.headers["Implementation-Version"] = brandingCode;
-			res.writeBody(fallbackJson.toString(JSONOptions.doNotEscapeSlashes), "application/json");
-		}
+		res.headers["Implementation-Version"] = brandingCode;
+		res.writeBody(responseJson.toString(JSONOptions.doNotEscapeSlashes), "application/json");
 	}
 
 	@method(HTTPMethod.POST)
 	@path("/v3/get_headers")
 	void getHeaders(HTTPServerRequest req, HTTPServerResponse res) {
 		auto log = getLogger();
-		log.info("[<<] anisette-v3 /v3/get_headers (proxying to upstream)");
-
-		string requestPayload;
+		log.info("[<<] anisette-v3 /v3/get_headers");
+		string identifier = "(null)";
+		string tmpProvisioningPath;
 		try {
-			requestPayload = req.bodyReader.readAllUTF8();
-		} catch (Exception ex) {
-			log.errorF!"[!] Error reading request body: %s"(ex.msg);
-			JSONValue error = [
-				"result": "GetHeadersError",
-				"message": "Failed to read request body: " ~ ex.msg
+			auto json = req.json();
+			ubyte[] identifierBytes = Base64.decode(json["identifier"].to!string());
+			ubyte[] adi_pb = Base64.decode(json["adi_pb"].to!string());
+			identifier = UUID(identifierBytes[0..16]).toString();
+			tmpProvisioningPath = provisioningPath.buildPath(identifier);
+
+			if (file.exists(tmpProvisioningPath)) {
+				file.rmdirRecurse(tmpProvisioningPath);
+			}
+
+			file.mkdirRecurse(tmpProvisioningPath);
+			file.write(tmpProvisioningPath.buildPath("adi.pb"), adi_pb);
+
+			GC.disable(); // garbage collector can deallocate ADI parts since it can't find the pointers.
+			scope(exit) {
+				GC.enable();
+				GC.collect();
+			}
+
+			scope ADI adi = makeGarbageCollectedADI(libraryPath);
+			adi.provisioningPath = tmpProvisioningPath;
+			adi.identifier = identifier.toUpper()[0..16];
+
+			auto otp = adi.requestOTP(dsId);
+			file.rmdirRecurse(tmpProvisioningPath);
+
+			JSONValue response = [
+				"result": "Headers",
+				"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
+				"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
+				"X-Apple-I-MD-RINFO": activeRoutingInfo,
 			];
 			res.headers["Implementation-Version"] = brandingCode;
-			res.writeBody(error.toString(JSONOptions.doNotEscapeSlashes), "application/json");
-			return;
-		}
-
-		try {
-			auto upstreamRes = forwardPOST("/v3/get_headers", requestPayload);
-			res.headers["Implementation-Version"] = brandingCode;
-			res.writeBody(upstreamRes.responseBody, upstreamRes.contentType.length ? upstreamRes.contentType : "application/json");
-			log.info("[>>] anisette-v3 /v3/get_headers OK (relayed from upstream)");
-		} catch (Exception ex) {
-			log.errorF!"[!] Failed to forward get_headers to upstream: %s"(ex.msg);
+			res.writeBody(response.toString(JSONOptions.doNotEscapeSlashes), "application/json");
+			log.info("[>>] anisette-v3 /v3/get_headers OK.");
+		} catch (Throwable t) {
 			JSONValue error = [
 				"result": "GetHeadersError",
-				"message": "Upstream error: " ~ ex.msg
+				"message": typeid(t).name ~ ": " ~ t.msg
 			];
 			res.headers["Implementation-Version"] = brandingCode;
+			log.info("[>>] anisette-v3 /v3/get_headers error.");
 			res.writeBody(error.toString(JSONOptions.doNotEscapeSlashes), "application/json");
+		} finally {
+			if (file.exists(tmpProvisioningPath)) {
+				file.rmdirRecurse(tmpProvisioningPath);
+			}
 		}
 	}
 
 	@method(HTTPMethod.GET)
 	@path("/v3/provisioning_session")
-	void provisionSession(scope WebSocket clientSocket) {
+	void provisionSession(scope WebSocket socket) {
 		auto log = getLogger();
+		scope(exit) socket.close();
+
+		auto requestUUID = randomUUID().toString(); // Assign a random UUID to the request to make it easier to track.
+		log.infoF!"[<< %s] anisette-v3 /v3/provisionSession connected."(requestUUID);
+
+		JSONValue giveIdentifier = [
+			"result": "GiveIdentifier"
+		];
+		socket.send(giveIdentifier.toString(JSONOptions.doNotEscapeSlashes));
+
+		log.infoF!"[>> %s] Asking for identifier."(requestUUID);
+		if (!socket.waitForData(timeout)) {
+			JSONValue timeoutJs = [
+				"result": "Timeout"
+			];
+			log.infoF!"[>> %s] Timeout!"(requestUUID);
+			socket.send(timeoutJs.toString(JSONOptions.doNotEscapeSlashes));
+			return;
+		}
+
+		string identifier;
+		try {
+			auto res = parseJSON(socket.receiveText());
+			ubyte[] requestedIdentifier = Base64.decode(res["identifier"].str());
+			log.infoF!"[>> %s] Got it."(requestUUID);
+
+			identifier = UUID(requestedIdentifier[0..16]).toString();
+		} catch (Exception ex) {
+			JSONValue response = [
+				"result": "InvalidIdentifier"
+			];
+
+			log.infoF!"[>> %s] It is invalid: %s"(requestUUID, ex);
+			socket.send(response.toString(JSONOptions.doNotEscapeSlashes));
+			return;
+		}
+
+		log.infoF!("[<< %s] Correct identifier (%s).")(requestUUID, identifier);
+
+		GC.disable(); // garbage collector can deallocate ADI parts since it can't find the pointers.
 		scope(exit) {
-			if (clientSocket.connected) {
-				clientSocket.close();
+			GC.enable();
+			GC.collect();
+		}
+		scope ADI adi = makeGarbageCollectedADI(libraryPath);
+		auto tmpProvisioningPath = provisioningPath.buildPath(identifier);
+		file.mkdirRecurse(tmpProvisioningPath);
+		adi.provisioningPath = tmpProvisioningPath;
+		scope(exit) {
+			if (file.exists(tmpProvisioningPath)) {
+				file.rmdirRecurse(tmpProvisioningPath);
 			}
 		}
+		adi.identifier = identifier.toUpper()[0..16];
 
-		auto requestUUID = randomUUID().toString();
-		log.infoF!"[<< %s] anisette-v3 /v3/provisioning_session client connected"(requestUUID);
+		JSONValue response = [
+			"result": "GiveStartProvisioningData"
+		];
+		log.infoF!"[>> %s] Okay asking for spim now."(requestUUID);
 
-		bool relayed = false;
-		size_t count = upstreamServers.length;
+		socket.send(response.toString(JSONOptions.doNotEscapeSlashes));
 
-		for (size_t i = 0; i < count; i++) {
-			if (!clientSocket.connected) {
-				log.infoF!"[-- %s] Client disconnected before upstream connection"(requestUUID);
-				return;
-			}
-
-			size_t targetIdx = (activeUpstreamIndex + i) % count;
-			string upstream = upstreamServers[targetIdx];
-			bool sessionStarted = false;
-
-			try {
-				log.infoF!"[.. %s] Connecting to upstream WebSocket [%s]"(requestUUID, upstream);
-				auto wsUrl = URL(upstream ~ "/v3/provisioning_session");
-				if (wsUrl.schema == "https" || wsUrl.schema == "wss") {
-					wsUrl.schema = "wss";
-				} else {
-					wsUrl.schema = "ws";
-				}
-
-				auto settings = createProxyClientSettings();
-
-				WebSocket upstreamWs = connectWebSocket(wsUrl, settings);
-				scope(exit) {
-					if (upstreamWs !is null && upstreamWs.connected) {
-						upstreamWs.close();
-					}
-				}
-
-				log.infoF!"[== %s] Connected to upstream WebSocket at [%s]"(requestUUID, upstream);
-				bool upstreamTurn = true;
-
-				while (clientSocket.connected && upstreamWs.connected) {
-					if (upstreamTurn) {
-						if (!upstreamWs.waitForData(timeout)) {
-							log.warnF!"[-- %s] Timeout waiting for data from upstream"(requestUUID);
-							break;
-						}
-						string msg = upstreamWs.receiveText();
-						log.infoF!"[>> %s] [Upstream -> Client] %s"(requestUUID, msg);
-						clientSocket.send(msg);
-						sessionStarted = true;
-
-						if (msg.canFind("ProvisioningSuccess") || msg.canFind("Error") || msg.canFind("Invalid")) {
-							log.infoF!"[== %s] Upstream concluded session with: %s"(
-								requestUUID,
-								msg.canFind("ProvisioningSuccess") ? "SUCCESS" : "TERMINATION"
-							);
-							if (msg.canFind("ProvisioningSuccess")) {
-								activeUpstreamIndex = targetIdx; // Pin this upstream so get_headers uses matching machine
-								sleep(500.msecs);
-							}
-							break;
-						}
-						upstreamTurn = false;
-					} else {
-						if (!clientSocket.waitForData(timeout)) {
-							log.warnF!"[-- %s] Timeout waiting for data from client"(requestUUID);
-							break;
-						}
-						string msg = clientSocket.receiveText();
-						log.infoF!"[<< %s] [Client -> Upstream] %s"(requestUUID, msg);
-						upstreamWs.send(msg);
-						upstreamTurn = true;
-					}
-				}
-
-				relayed = true;
-				log.infoF!"[== %s] Provisioning session finished via upstream [%s]"(requestUUID, upstream);
-				break;
-			} catch (Exception ex) {
-				log.warnF!"[!! %s] Upstream [%s] failed: %s"(requestUUID, upstream, ex.msg);
-				if (sessionStarted) {
-					break;
-				}
-			}
+		if (!socket.waitForData(timeout)) {
+			JSONValue timeoutJs = [
+				"result": "Timeout"
+			];
+			log.infoF!"[>> %s] Timeout!"(requestUUID);
+			socket.send(timeoutJs.toString(JSONOptions.doNotEscapeSlashes));
+			return;
 		}
 
-		if (!relayed && clientSocket.connected) {
-			log.errorF!"[!! %s] All upstream servers failed for provisioning session"(requestUUID);
-			try {
-				JSONValue err = [
-					"result": "StartProvisioningError",
-					"message": "All upstream macOS ADI servers failed to connect"
-				];
-				clientSocket.send(err.toString(JSONOptions.doNotEscapeSlashes));
-			} catch (Exception ex) {}
+		uint session;
+		try {
+			auto res = parseJSON(socket.receiveText());
+
+			string spim = res["spim"].str();
+			log.infoF!"[<< %s] Received SPIM."(requestUUID);
+			auto cpimAndCo = adi.startProvisioning(-2, Base64.decode(spim));
+			session = cpimAndCo.session;
+			scope(failure) adi.destroyProvisioning(session);
+
+			response = [
+				"result": "GiveEndProvisioningData",
+				"cpim": Base64.encode(cpimAndCo.clientProvisioningIntermediateMetadata)
+			];
+			log.infoF!"[>> %s] Okay gimme ptm tk."(requestUUID);
+
+			socket.send(response.toString(JSONOptions.doNotEscapeSlashes));
+		} catch (Exception ex) {
+			JSONValue error = [
+				"result": "StartProvisioningError",
+				"message": format!"%s (request id: %s)"(ex.msg, requestUUID)
+			];
+			log.errorF!"[>> %s] anisette-v3 error: %s"(requestUUID, ex);
+			socket.send(error.toString());
+			return;
 		}
+
+		if (!socket.waitForData(timeout)) {
+			JSONValue timeoutJs = [
+				"result": "Timeout"
+			];
+			log.infoF!"[>> %s] Timeout!"(requestUUID);
+			socket.send(timeoutJs.toString(JSONOptions.doNotEscapeSlashes));
+			return;
+		}
+
+		try {
+			auto res = parseJSON(socket.receiveText());
+			string ptm = res["ptm"].str();
+			string tk = res["tk"].str();
+			log.infoF!"[<< %s] Received PTM and TK."(requestUUID);
+
+			adi.endProvisioning(session, Base64.decode(ptm), Base64.decode(tk));
+
+			auto adiPath = adi.provisioningPath().buildPath("adi.pb");
+			file.setAttributes(adiPath, 384); // 0600 = rw for owner
+
+			response = [
+				"result": "ProvisioningSuccess",
+				"adi_pb": Base64.encode(
+					cast(ubyte[]) file.read(adiPath)
+				)
+			];
+		} catch (Exception ex) {
+			JSONValue error = [
+				"result": "EndProvisioningError",
+				"message": format!"%s (request id: %s)"(ex.msg, requestUUID)
+			];
+			log.errorF!"[>> %s] anisette-v3 error: %s"(requestUUID, ex);
+			socket.send(error.toString());
+			return;
+		}
+
+		log.infoF!"[>> %s] Okay all right here is your provisioning data."(requestUUID);
+		socket.send(response.toString(JSONOptions.doNotEscapeSlashes));
 	}
+}
+
+private ADI makeGarbageCollectedADI(string libraryPath) {
+	extern(C) void* malloc_GC(size_t sz) {
+		return GC.malloc(sz, GC.BlkAttr.NO_MOVE | GC.BlkAttr.NO_SCAN);
+	}
+
+	extern(C) void free_GC(void* ptr) {
+		GC.free(ptr);
+	}
+
+	AndroidLibrary storeServicesCore = new AndroidLibrary(libraryPath.buildPath("libstoreservicescore.so"), [
+		"malloc": cast(void*) &malloc_GC,
+		"free": cast(void*) &free_GC
+	]);
+
+	return new ADI(libraryPath, storeServicesCore);
 }
