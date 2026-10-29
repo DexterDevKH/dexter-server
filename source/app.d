@@ -266,14 +266,13 @@ class AnisetteService {
 	@method(HTTPMethod.GET)
 	@path("/health")
 	void healthCheck(HTTPServerRequest req, HTTPServerResponse res) {
-		JSONValue health = [
-			"status": "ok",
-			"service": brandingCode,
-			"activeUpstream": upstreamServers.length ? upstreamServers[activeUpstreamIndex] : "none",
-			"configuredUpstreams": upstreamServers.length
-		];
+		JSONValue[string] health;
+		health["status"] = JSONValue("ok");
+		health["service"] = JSONValue(brandingCode);
+		health["activeUpstream"] = JSONValue(upstreamServers.length ? upstreamServers[activeUpstreamIndex] : "none");
+		health["configuredUpstreams"] = JSONValue(cast(long) upstreamServers.length);
 		res.headers["Implementation-Version"] = brandingCode;
-		res.writeBody(health.toString(JSONOptions.doNotEscapeSlashes), "application/json");
+		res.writeBody(JSONValue(health).toString(JSONOptions.doNotEscapeSlashes), "application/json");
 	}
 
 	@method(HTTPMethod.GET)
