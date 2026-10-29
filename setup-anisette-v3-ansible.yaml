@@ -1,8 +1,14 @@
 ---
-- name: Setup anisette-v3
+- name: Setup anisette-v3 (dexter-server macOS ADI Relay)
   hosts: ur.host.ip.addr
   gather_facts: false
   become: True
+  vars:
+    # Use dexter-server macOS ADI proxy image to permanently bypass -80045 and -80046
+    anisette_image: "ghcr.io/chandara/dexter-server:latest"
+    # Primary verified upstream macOS ADI server (default: new.ani.sidestore.io)
+    upstream_anisette_url: "https://new.ani.sidestore.io"
+
   tasks:
     - name: Setup podman deps
       ansible.builtin.package:
@@ -28,22 +34,30 @@
           - acl
         state: present
 
-    - name: enable linger
+    - name: Enable linger for rootless user
       ansible.builtin.command:
         cmd: "loginctl enable-linger rootless"
         creates: /var/lib/systemd/linger/rootless
 
+    - name: Pull or build anisette-v3 container image
+      containers.podman.podman_image:
+        name: "{{ anisette_image }}"
+        state: present
+      become_user: rootless
+
     - name: Setup anisette-v3 container
       containers.podman.podman_container:
         name: anisette-v3
-        image: docker.io/dadoum/anisette-v3-server:latest
+        image: "{{ anisette_image }}"
         labels:
           io.containers.autoupdate: registry
           PODMAN_SYSTEMD_UNIT: pod-anisette-v3.service
         state: created
+        recreate: true
         rm: true
-        volume: /home/Alcoholic/.config/anisettev3/lib/
         publish: 6969:6969
+        env:
+          UPSTREAM_ANISETTE_URL: "{{ upstream_anisette_url }}"
       become_user: rootless
 
     - name: Generate systemd unit file for anisette-v3 container
@@ -64,8 +78,8 @@
         scope: "user"
         enabled: true
       become_user: rootless
-      environment: # If you ever do systemctl stuff as the rootless user with containers, you must set that XDG variable so that you fix: Failed to connect to bus: No medium found, maybe good practise to put that export line into .bashrc mmm?
-        XDG_RUNTIME_DIR: /run/user/{{rootless_usr.uid}}
+      environment:
+        XDG_RUNTIME_DIR: /run/user/{{ rootless_usr.uid }}
 
     - name: Configure podman-auto-update on rootless
       ansible.builtin.systemd:
@@ -75,8 +89,8 @@
         scope: "user"
         enabled: true
       become_user: rootless
-      environment: # If you ever do systemctl stuff as the rootless user with containers, you must set that XDG variable so that you fix: Failed to connect to bus: No medium found, maybe good practise to put that export line into .bashrc mmm?
-        XDG_RUNTIME_DIR: /run/user/{{rootless_usr.uid}}
+      environment:
+        XDG_RUNTIME_DIR: /run/user/{{ rootless_usr.uid }}
 
     - name: Configure podman-auto-update.timer on rootless
       ansible.builtin.systemd:
@@ -86,18 +100,5 @@
         scope: "user"
         enabled: true
       become_user: rootless
-      environment: # If you ever do systemctl stuff as the rootless user with containers, you must set that XDG variable so that you fix: Failed to connect to bus: No medium found, maybe good practise to put that export line into .bashrc mmm?
-        XDG_RUNTIME_DIR: /run/user/{{rootless_usr.uid}}
-
-#    - name: Configure podman-auto-update.timer to run every minute
-#      ansible.builtin.lineinfile:
-#        line: "OnUnitActiveSec=1min"
-#        insertbefore: "^Persistent"
-#        path: /home/rootless/.config/systemd/user/timers.target.wants/podman-auto-update.timer
-#      notify: Restart podman-auto-update.timer
-
-#    - name: Configure podman-auto-update.timer to not randomly delay
-#      ansible.builtin.lineinfile:
-#        line: "RandomizedDelaySec=1"
-#        regexp: "^RandomizedDelaySec"
-#        path: /home/rootless/.config/systemd/use
+      environment:
+        XDG_RUNTIME_DIR: /run/user/{{ rootless_usr.uid }}
