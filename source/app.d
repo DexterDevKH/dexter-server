@@ -37,9 +37,9 @@ HTTPClientSettings createProxyClientSettings() {
 	auto settings = new HTTPClientSettings;
 	settings.connectTimeout = 5.seconds;
 	settings.readTimeout = timeout;
-	auto tlsCtx = createTLSContext(TLSContextKind.client);
-	tlsCtx.peerValidationMode = TLSPeerValidationMode.none;
-	settings.tlsContext = tlsCtx;
+	settings.tlsContextSetup = (TLSContext ctx) @safe nothrow {
+		ctx.peerValidationMode = TLSPeerValidationMode.none;
+	};
 	return settings;
 }
 
