@@ -409,17 +409,7 @@ class AnisetteService {
 				log.infoF!"[== %s] Connected to upstream WebSocket at [%s]"(requestUUID, upstream);
 
 				while (clientSocket.connected && upstreamWs.connected) {
-					// Round 1: Client sends SPIM; Round 2: Client sends PTM/TK
-					if (!clientSocket.waitForData(timeout)) {
-						log.warnF!"[-- %s] Timeout waiting for data from client"(requestUUID);
-						break;
-					}
-					string clientMsg = clientSocket.receiveText();
-					log.infoF!"[<< %s] [Client -> Upstream] %s"(requestUUID, clientMsg);
-					upstreamWs.send(clientMsg);
-					sessionStarted = true;
-
-					// Round 1: Upstream replies with CPIM; Round 2: Upstream replies with ProvisioningSuccess
+					// 1. Wait for upstream message (Starts with GiveIdentifier, then GiveStartProvisioningData, CPIM, ProvisioningSuccess)
 					if (!upstreamWs.waitForData(timeout)) {
 						log.warnF!"[-- %s] Timeout waiting for data from upstream"(requestUUID);
 						break;
@@ -427,6 +417,7 @@ class AnisetteService {
 					string upstreamMsg = upstreamWs.receiveText();
 					log.infoF!"[>> %s] [Upstream -> Client] %s"(requestUUID, upstreamMsg);
 					clientSocket.send(upstreamMsg);
+					sessionStarted = true;
 
 					if (upstreamMsg.canFind("ProvisioningSuccess") || upstreamMsg.canFind("Error") || upstreamMsg.canFind("Invalid")) {
 						log.infoF!"[== %s] Upstream concluded session with: %s"(
@@ -436,10 +427,19 @@ class AnisetteService {
 						if (upstreamMsg.canFind("ProvisioningSuccess")) {
 							activeUpstreamIndex = targetIdx; // Pin this upstream so subsequent get_headers matches
 							relayed = true;
-							sleep(200.msecs);
+							sleep(500.msecs);
 						}
 						break;
 					}
+
+					// 2. Wait for client response (Identifier, SPIM, PTM/TK)
+					if (!clientSocket.waitForData(timeout)) {
+						log.warnF!"[-- %s] Timeout waiting for data from client"(requestUUID);
+						break;
+					}
+					string clientMsg = clientSocket.receiveText();
+					log.infoF!"[<< %s] [Client -> Upstream] %s"(requestUUID, clientMsg);
+					upstreamWs.send(clientMsg);
 				}
 
 				if (relayed) {
