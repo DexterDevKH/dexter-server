@@ -5,6 +5,8 @@ import std.algorithm.searching;
 import std.array;
 import std.base64;
 import std.conv;
+import std.datetime.systime;
+import std.datetime.timezone;
 import std.digest;
 import file = std.file;
 import std.format;
@@ -45,37 +47,37 @@ struct AnisetteProfile {
 	string routingInfo;
 }
 
-// Profile presets learned from altserver-macos27-anisette-fix and AltStore PR #1834:
-// 1. "mac" (default): Authentic Mac AuthKit profile from altserver-macos27-anisette-fix v1.3.3.
-//    Fixes Apple GrandSlam -80045, -80046, and invalid anisette responses.
+// Profile presets learned from altserver-macos27-anisette-fix, AltStore PR #1834, and Dadoum Issue #61:
+// 1. "windows" (default): The only profile verified to bypass Apple's GrandSlam -80045 block on Linux/Docker servers.
+//    Used by AltStore PR #1834, iloader 2.3.8, and ani.jkcoxson.com.
+enum windowsProfile = AnisetteProfile(
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>",
+	"akd/1.0 CFNetwork/808.1.4",
+	"33883392" // 0x02050500 (Windows iTunes ADI routing info)
+);
+
+// 2. "windows-itunes": Windows profile with desktop iTunes User-Agent
+enum windowsItunesProfile = AnisetteProfile(
+	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>",
+	"iTunes/12.12.4 (Windows; Microsoft Windows 10 x64)",
+	"33883392"
+);
+
+// 3. "mac": Mac AuthKit profile (matching new.ani.sidestore.io with 67437824)
 enum macProfile = AnisetteProfile(
 	"<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
 	"akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0",
-	"16777216" // 0x01000000 (Mac ADI routing info)
+	"67437824" // 0x04050500 (as returned by new.ani.sidestore.io)
 );
 
-// 2. "mac-xcode": Modern macOS AuthKit + Xcode profile from altserver-macos27-anisette-fix v3.8 helper
+// 4. "mac-xcode": Modern macOS AuthKit + Xcode profile
 enum macXcodeProfile = AnisetteProfile(
 	"<MacBookPro13,3> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/25183.54.10)>",
 	"akd/1.0 CFNetwork/808.1.4",
-	"16777216"
+	"67437824"
 );
 
-// 3. "windows": Authentic Windows 10 x64 iTunes profile from AltStore PR #1834
-enum windowsProfile = AnisetteProfile(
-	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>",
-	"iTunes/12.12.4 (Windows; Microsoft Windows 10 x64)",
-	"16777216"
-);
-
-// 4. "windows-akd": Windows AuthKit profile
-enum windowsAkdProfile = AnisetteProfile(
-	"<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
-	"akd/1.0 CFNetwork/808.1.4",
-	"16777216"
-);
-
-__gshared string activeProfileName = "mac";
+__gshared string activeProfileName = "windows";
 __gshared string activeClientInfo;
 __gshared string activeUserAgent;
 __gshared string activeRoutingInfo;
@@ -106,30 +108,31 @@ int main(string[] args) {
 		}
 	}
 
-	// Determine active profile preset from environment or default to "mac"
-	activeProfileName = process.environment.get("ANISETTE_PROFILE", "mac");
+	// Determine active profile preset from environment or default to "windows" (the -80045 fix)
+	activeProfileName = process.environment.get("ANISETTE_PROFILE", "windows");
 
 	AnisetteProfile selectedProfile;
 	switch (activeProfileName.toLower()) {
-		case "windows":
-		case "pc":
-			activeProfileName = "windows";
-			selectedProfile = windowsProfile;
-			break;
-		case "windows-akd":
-			activeProfileName = "windows-akd";
-			selectedProfile = windowsAkdProfile;
+		case "mac":
+		case "macos":
+			activeProfileName = "mac";
+			selectedProfile = macProfile;
 			break;
 		case "mac-xcode":
 		case "xcode":
 			activeProfileName = "mac-xcode";
 			selectedProfile = macXcodeProfile;
 			break;
-		case "mac":
-		case "macos":
+		case "windows-itunes":
+		case "itunes":
+			activeProfileName = "windows-itunes";
+			selectedProfile = windowsItunesProfile;
+			break;
+		case "windows":
+		case "pc":
 		default:
-			activeProfileName = "mac";
-			selectedProfile = macProfile;
+			activeProfileName = "windows";
+			selectedProfile = windowsProfile;
 			break;
 	}
 
@@ -159,7 +162,7 @@ int main(string[] args) {
 		"p|port", format!"The port to bind to (default: %s)"(port), &port,
 		"a|adi-path", format!"Where the provisioning information should be stored on the computer for anisette-v1 backwards compat (default: %s)"(configurationPath), &configurationPath,
 		"timeout", format!"Timeout duration for Anisette V3 in milliseconds (default: %d)"(timeoutMsecs), &timeoutMsecs,
-		"profile", format!"Profile preset (mac, mac-xcode, windows, windows-akd) (default: %s)"(activeProfileName), &activeProfileName,
+		"profile", format!"Profile preset (windows, windows-itunes, mac, mac-xcode) (default: %s)"(activeProfileName), &activeProfileName,
 		"client-info", format!"Apple AuthKit client info string (default: %s)"(activeClientInfo), &activeClientInfo,
 		"user-agent", format!"User-Agent string for Apple requests (default: %s)"(activeUserAgent), &activeUserAgent,
 		"routing-info", format!"Routing info string (default: %s)"(activeRoutingInfo), &activeRoutingInfo,
@@ -239,13 +242,20 @@ int main(string[] args) {
 		v1Device.serverFriendlyDescription = activeClientInfo;
 		v1Device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
 		v1Device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
-		v1Device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
+		// In genuine AuthKit, localUserUUID is the Base64 encoding of the unique device identifier
+		v1Device.localUserUUID = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
 
 		log.info("Machine creation done!");
 	} else {
 		if (v1Device.serverFriendlyDescription != activeClientInfo) {
 			log.infoF!"Updating device description to active clientInfo: %s"(activeClientInfo);
 			v1Device.serverFriendlyDescription = activeClientInfo;
+		}
+		// Ensure localUserUUID is strictly Base64 encoded UUID
+		string expectedLU = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
+		if (v1Device.localUserUUID != expectedLU) {
+			log.info("Normalizing device localUserUUID to Base64 format");
+			v1Device.localUserUUID = expectedLU;
 		}
 	}
 
@@ -305,12 +315,10 @@ class AnisetteService {
 	@method(HTTPMethod.GET)
 	@path("/")
 	void handleV1Request(HTTPServerRequest req, HTTPServerResponse res) {
-		import std.datetime.systime;
-		import std.datetime.timezone;
-		import core.time;
 		auto log = getLogger();
 		log.info("[<<] anisette-v1 request");
-		auto time = Clock.currTime();
+		auto time = Clock.currTime(UTC());
+		string clientTime = time.toISOExtString.split('.')[0] ~ "Z";
 
 		if (!v1Adi.isMachineProvisioned(dsId)) {
 			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);
@@ -319,16 +327,17 @@ class AnisetteService {
 		}
 		
 		auto otp = v1Adi.requestOTP(dsId);
+		string base64LU = Base64.encode(cast(ubyte[]) v1Device.uniqueDeviceIdentifier);
 
 		JSONValue responseJson = [
-			"X-Apple-I-Client-Time": time.toISOExtString.split('.')[0] ~ "Z",
+			"X-Apple-I-Client-Time": clientTime,
 			"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 			"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
 			"X-Apple-I-MD-RINFO": activeRoutingInfo,
-			"X-Apple-I-MD-LU": v1Device.localUserUUID,
+			"X-Apple-I-MD-LU": base64LU,
 			"X-Apple-I-SRL-NO": "0",
 			"X-MMe-Client-Info": activeClientInfo,
-			"X-Apple-I-TimeZone": time.timezone.dstName,
+			"X-Apple-I-TimeZone": "GMT",
 			"X-Apple-Locale": "en_US",
 			"X-Mme-Device-Id": v1Device.uniqueDeviceIdentifier,
 		];
@@ -386,11 +395,18 @@ class AnisetteService {
 			auto otp = adi.requestOTP(dsId);
 			file.rmdirRecurse(tmpProvisioningPath);
 
+			auto time = Clock.currTime(UTC());
+			string clientTime = time.toISOExtString.split('.')[0] ~ "Z";
+
 			JSONValue response = [
 				"result": "Headers",
 				"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 				"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
 				"X-Apple-I-MD-RINFO": activeRoutingInfo,
+				"X-Apple-I-MD-LU": Base64.encode(cast(ubyte[]) identifier),
+				"X-Apple-I-Client-Time": clientTime,
+				"X-Apple-I-TimeZone": "GMT",
+				"X-Apple-Locale": "en_US",
 			];
 			res.headers["Implementation-Version"] = brandingCode;
 			res.writeBody(response.toString(JSONOptions.doNotEscapeSlashes), "application/json");
