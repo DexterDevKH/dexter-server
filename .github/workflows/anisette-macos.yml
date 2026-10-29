@@ -1,0 +1,142 @@
+name: macOS Anisette Server (On-Demand)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'How many hours to keep the server alive'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
+          - '6'
+
+env:
+  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN || '3LN61DNykw6PQDtx2ZBZghhlVVn_2YjJmaffNLZRvGtNHA5EJ' }}
+  NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN || 'cartwheel-sample-rimless.ngrok-free.dev' }}
+
+jobs:
+  run-macos-server:
+    name: Run macOS Anisette Runner
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache Dub Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.dub
+          key: ${{ runner.os }}-dub-${{ hashFiles('dub.json', 'dub.selections.json') }}
+          restore-keys: |
+            ${{ runner.os }}-dub-
+
+      - name: Install LDC, Dub, and OpenSSL
+        run: |
+          brew install ldc dub openssl@3 pkg-config
+
+      - name: Install ngrok and Cloudflared
+        run: |
+          echo "Downloading ngrok (macOS arm64)..."
+          curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip -o ngrok.zip
+          unzip -q ngrok.zip
+          chmod +x ngrok
+          sudo mv ngrok /usr/local/bin/ngrok
+          ngrok version
+
+          echo "Downloading cloudflared as fallback..."
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz | tar -xz
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+
+      - name: Build dexter-server
+        run: |
+          export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig:$PKG_CONFIG_PATH"
+          dub build -b release -c default --compiler=ldc2
+
+      - name: Start dexter-server
+        run: |
+          ./anisette-v3-server --port 6969 &
+          sleep 3
+          curl -f http://127.0.0.1:6969/health || cat <(echo "Health check failed")
+
+      - name: Start Public Tunnel
+        id: tunnel
+        run: |
+          TUNNEL_URL=""
+          
+          # Attempt ngrok with static domain
+          if [ -n "$NGROK_AUTHTOKEN" ] && [ -n "$NGROK_DOMAIN" ]; then
+            echo "Configuring ngrok with permanent domain: $NGROK_DOMAIN"
+            ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+            ngrok http 6969 --url="$NGROK_DOMAIN" > ngrok.log 2>&1 &
+            
+            sleep 4
+            if curl -s http://127.0.0.1:4040/api/tunnels | grep -q "$NGROK_DOMAIN"; then
+              TUNNEL_URL="https://$NGROK_DOMAIN"
+              echo "ngrok tunnel online at $TUNNEL_URL"
+            else
+              echo "ngrok failed to connect. Showing log:"
+              cat ngrok.log
+            fi
+          fi
+
+          # Fallback to Cloudflare Quick Tunnel if ngrok was not started
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Starting Cloudflare Quick Tunnel fallback..."
+            cloudflared tunnel --url http://127.0.0.1:6969 --no-autoupdate > cloudflared.log 2>&1 &
+            for i in {1..30}; do
+              if grep -E -o "https://[a-zA-Z0-9-]+\.trycloudflare\.com" cloudflared.log > /dev/null 2>&1; then
+                TUNNEL_URL=$(grep -E -o "https://[a-zA-Z0-9-]+\.trycloudflare\.com" cloudflared.log | head -n 1)
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "::error::Failed to establish any tunnel."
+            exit 1
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_OUTPUT
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+
+      - name: Display Connection Details
+        run: |
+          echo "=========================================================="
+          echo "       macOS ANISETTE SERVER IS NOW ONLINE!               "
+          echo "=========================================================="
+          echo ""
+          echo "  Permanent Anisette URL for SideStore:"
+          echo "  ${{ steps.tunnel.outputs.TUNNEL_URL }}"
+          echo ""
+          echo "=========================================================="
+          
+          echo "## 🚀 macOS Anisette Server Is Online!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Permanent Anisette URL** | \`${{ steps.tunnel.outputs.TUNNEL_URL }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Runner Architecture** | Apple Silicon (${{ runner.arch }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Keep-Alive Duration** | ${{ github.event.inputs.duration_hours || 2 }} hour(s) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Quick Setup in SideStore" >> $GITHUB_STEP_SUMMARY
+          echo "1. Open **SideStore** $\rightarrow$ **Settings**." >> $GITHUB_STEP_SUMMARY
+          echo "2. Set **Anisette URL** to your permanent URL:" >> $GITHUB_STEP_SUMMARY
+          echo "   \`${{ steps.tunnel.outputs.TUNNEL_URL }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Tap **Reset adi.pb**." >> $GITHUB_STEP_SUMMARY
+          echo "4. Force-close SideStore and re-open." >> $GITHUB_STEP_SUMMARY
+          echo "5. Sign in with your Apple ID!" >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep Runner Alive
+        run: |
+          HOURS=${{ github.event.inputs.duration_hours || 2 }}
+          SECS=$((HOURS * 3600))
+          echo "Server will remain online at ${{ steps.tunnel.outputs.TUNNEL_URL }} for $HOURS hours..."
+          echo "When you finish signing in or refreshing, you can cancel this run at any time."
+          sleep $SECS

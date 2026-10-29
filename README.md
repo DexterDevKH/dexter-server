@@ -66,6 +66,26 @@ On October 12, 2026, Apple updated its GrandSlam authentication service (`gsa.ap
 
 ---
 
+## Option 2: Run On-Demand on GitHub Actions (Genuine Apple Silicon Mac Runner)
+
+With your permanent ngrok static domain configured, your Anisette URL **never changes**:
+`https://cartwheel-sample-rimless.ngrok-free.dev`
+
+1. Go to your **GitHub repository** on GitHub.com.
+2. Click on the **Actions** tab.
+3. In the left sidebar, click on **macOS Anisette Server (On-Demand)**.
+4. Click **Run workflow**:
+   - Choose how many hours to keep it active (1, 2, 4, or 6 hours).
+   - Click the green **Run workflow** button.
+5. In SideStore, set your **Anisette URL** permanently to:
+   ```text
+   https://cartwheel-sample-rimless.ngrok-free.dev
+   ```
+6. Tap **Reset adi.pb**, force-close SideStore, re-open, and sign in!
+7. Once finished, click **Cancel run** in GitHub Actions to stop the runner early.
+
+---
+
 ## Crucial Client Step: How to Avoid -80045 in SideStore
 
 If you previously encountered `-80045`, SideStore has the old rejected token cached in its local `adi.pb` file. You must reset it before signing in:
