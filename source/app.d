@@ -83,7 +83,6 @@ UpstreamResponse forwardGET(string path) {
 
 			if (res.statusCode == 200) {
 				log.infoF!"[<-] Upstream [%s] responded with 200 OK for GET %s"(upstream, path);
-				activeUpstreamIndex = targetIdx;
 				return res;
 			} else {
 				log.warnF!"[!] Upstream [%s] returned HTTP %d for GET %s"(upstream, res.statusCode, path);
@@ -100,6 +99,9 @@ UpstreamResponse forwardPOST(string path, string jsonPayload) {
 	auto settings = createProxyClientSettings();
 
 	size_t count = upstreamServers.length;
+	UpstreamResponse lastErrRes;
+	bool hasErrRes = false;
+
 	for (size_t i = 0; i < count; i++) {
 		size_t targetIdx = (activeUpstreamIndex + i) % count;
 		string upstream = upstreamServers[targetIdx];
@@ -128,6 +130,12 @@ UpstreamResponse forwardPOST(string path, string jsonPayload) {
 			);
 
 			if (res.statusCode == 200) {
+				if (res.responseBody.canFind("-45061") || res.responseBody.canFind("not provisioned")) {
+					log.warnF!"[!] Upstream [%s] returned -45061 (device not provisioned on this machine)"(upstream);
+					lastErrRes = res;
+					hasErrRes = true;
+					continue; // Try sibling upstream machines in case adi.pb was provisioned there
+				}
 				log.infoF!"[<-] Upstream [%s] responded with 200 OK for POST %s"(upstream, path);
 				activeUpstreamIndex = targetIdx;
 				return res;
@@ -137,6 +145,9 @@ UpstreamResponse forwardPOST(string path, string jsonPayload) {
 		} catch (Exception ex) {
 			log.warnF!"[!] Failed POST %s on upstream [%s]: %s"(path, upstream, ex.msg);
 		}
+	}
+	if (hasErrRes) {
+		return lastErrRes;
 	}
 	throw new Exception("All upstream macOS ADI servers failed for POST " ~ path);
 }
@@ -396,46 +407,45 @@ class AnisetteService {
 				}
 
 				log.infoF!"[== %s] Connected to upstream WebSocket at [%s]"(requestUUID, upstream);
-				bool upstreamTurn = true;
 
 				while (clientSocket.connected && upstreamWs.connected) {
-					if (upstreamTurn) {
-						if (!upstreamWs.waitForData(timeout)) {
-							log.warnF!"[-- %s] Timeout waiting for data from upstream"(requestUUID);
-							break;
-						}
-						string msg = upstreamWs.receiveText();
-						log.infoF!"[>> %s] [Upstream -> Client] %s"(requestUUID, msg);
-						clientSocket.send(msg);
-						sessionStarted = true;
+					// Round 1: Client sends SPIM; Round 2: Client sends PTM/TK
+					if (!clientSocket.waitForData(timeout)) {
+						log.warnF!"[-- %s] Timeout waiting for data from client"(requestUUID);
+						break;
+					}
+					string clientMsg = clientSocket.receiveText();
+					log.infoF!"[<< %s] [Client -> Upstream] %s"(requestUUID, clientMsg);
+					upstreamWs.send(clientMsg);
+					sessionStarted = true;
 
-						if (msg.canFind("ProvisioningSuccess") || msg.canFind("Error") || msg.canFind("Invalid")) {
-							log.infoF!"[== %s] Upstream concluded session with: %s"(
-								requestUUID,
-								msg.canFind("ProvisioningSuccess") ? "SUCCESS" : "TERMINATION"
-							);
-							if (msg.canFind("ProvisioningSuccess")) {
-								activeUpstreamIndex = targetIdx; // Pin this upstream so get_headers uses matching machine
-								sleep(500.msecs);
-							}
-							break;
+					// Round 1: Upstream replies with CPIM; Round 2: Upstream replies with ProvisioningSuccess
+					if (!upstreamWs.waitForData(timeout)) {
+						log.warnF!"[-- %s] Timeout waiting for data from upstream"(requestUUID);
+						break;
+					}
+					string upstreamMsg = upstreamWs.receiveText();
+					log.infoF!"[>> %s] [Upstream -> Client] %s"(requestUUID, upstreamMsg);
+					clientSocket.send(upstreamMsg);
+
+					if (upstreamMsg.canFind("ProvisioningSuccess") || upstreamMsg.canFind("Error") || upstreamMsg.canFind("Invalid")) {
+						log.infoF!"[== %s] Upstream concluded session with: %s"(
+							requestUUID,
+							upstreamMsg.canFind("ProvisioningSuccess") ? "SUCCESS" : "TERMINATION"
+						);
+						if (upstreamMsg.canFind("ProvisioningSuccess")) {
+							activeUpstreamIndex = targetIdx; // Pin this upstream so subsequent get_headers matches
+							relayed = true;
+							sleep(200.msecs);
 						}
-						upstreamTurn = false;
-					} else {
-						if (!clientSocket.waitForData(timeout)) {
-							log.warnF!"[-- %s] Timeout waiting for data from client"(requestUUID);
-							break;
-						}
-						string msg = clientSocket.receiveText();
-						log.infoF!"[<< %s] [Client -> Upstream] %s"(requestUUID, msg);
-						upstreamWs.send(msg);
-						upstreamTurn = true;
+						break;
 					}
 				}
 
-				relayed = true;
-				log.infoF!"[== %s] Provisioning session finished via upstream [%s]"(requestUUID, upstream);
-				break;
+				if (relayed) {
+					log.infoF!"[== %s] Provisioning session successfully finished via upstream [%s]"(requestUUID, upstream);
+					break;
+				}
 			} catch (Exception ex) {
 				log.warnF!"[!! %s] Upstream [%s] failed: %s"(requestUUID, upstream, ex.msg);
 				if (sessionStarted) {
